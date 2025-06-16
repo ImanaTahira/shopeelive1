@@ -1,0 +1,580 @@
+#!/usr/bin/env python
+import sys
+import requests
+import re
+import threading
+import time
+import subprocess
+import psutil
+import os
+import json
+
+# Konstanta untuk subprocess creationflags (hanya untuk Windows)
+SUBPROCESS_CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
+
+# Path ke FFmpeg yang sudah ada di project
+FFMPEG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe")
+if not os.path.exists(FFMPEG_PATH):
+    FFMPEG_PATH = "ffmpeg"  # Gunakan FFmpeg dari PATH jika tidak ditemukan
+
+# Variabel global
+streaming_process = None
+streaming_status = False
+download_process = None
+download_status = False
+auto_reconnect = True
+reconnect_attempts = 0
+max_reconnect_attempts = 5  # Batas percobaan koneksi ulang
+
+def print_log(message):
+    """Tampilkan pesan log dengan timestamp"""
+    timestamp = time.strftime("[%H:%M:%S] ")
+    print(f"{timestamp}{message}")
+
+def check_session(cookie_string):
+    """Memeriksa sesi dari cookie Shopee"""
+    print_log("Mendapatkan data sesi...")
+    url = 'https://creator.shopee.co.id/supply/api/lm/sellercenter/realtime/sessionList?page=1&pageSize=1&name='
+    headers = {
+        'Host': 'creator.shopee.co.id',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0',
+        'Accept': 'application/json',
+        'Accept-Language': 'id,en-US;q=0.7,en;q=0.3',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Referer': 'https://creator.shopee.co.id/insight/live/list',
+        'Content-Type': 'application/json',
+        'X-Traceid': 'heG_qY0WxPfYS1WX7klFR',
+        'Language': 'en',
+        'X-Region': 'id',
+        'X-Region-Domain': 'co.id',
+        'X-Region-Timezone': '+0700',
+        'X-Env': 'live',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+        'Te': 'trailers',
+        'Cookie': cookie_string
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        return response.json()
+    except Exception as e:
+        print_log(f"Error: {str(e)}")
+        return None
+
+def get_data_live(session_id, cookie_string):
+    """Mendapatkan data live dari Shopee API"""
+    print_log(f"Mendapatkan data live untuk session ID: {session_id}")
+    url = f'https://live.shopee.co.id/api/v1/session/{session_id}/push_url_list?ver=2'
+    headers = {
+        'Host': 'live.shopee.co.id',
+        'ls_net_unicodeid': '321454518',
+        'x-shopee-client-timezone': 'Asia/Jakarta',
+        'client-request-id': '799ed8f0-f88d-44f7-8b8f-d8cd39264047.207',
+        'client-info': 'device_model=IN9023;os=0;os_version=30;client_version=31620;network=1;platform=1;language=id;cpu_model=Qualcomm+Technologies%2C+Inc+SDM636',
+        'x-livestreaming-source': 'shopee',
+        'x-ls-sz-token': 'Om9w2YHSSVM4mwzhy04Vuw==|ui3/GfDKzV9n2h+0KBIK2fSer8L5j2heZXdatTOd63pU0npKs5LEw2GhQOCsGa8a1ij8nONL8IJTsO9ustxRunkMwMbubcU=|44qNR/drvF5S6NKx|08|1',
+        'x-livestreaming-auth': 'ls_android_v1_10001_1705749720_36f1e51f-333e-4c10-af48-e017d9d57d0c|mH2Ct50CD3f7jkmofKS3qwzDRKJz5mLr2T3/vfAgQRQ=',
+        'time-type': '1705749720_2',
+        'user-agent': 'okhttp/3.12.4 app_type=1',
+        'content-type': 'application/json;charset=UTF-8',
+        'Cookie': cookie_string
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        push_urls = [addr['push_url'] for addr in data['data']['push_addr_list']]
+        return push_urls
+    except Exception as e:
+        print_log(f"Error: {str(e)}")
+        return []
+
+def get_streaming_url(session_id, cookie_string):
+    """Mengambil URL streaming dari API Shopee berdasarkan session ID dan cookie"""
+    print_log(f"Mengambil URL streaming untuk session ID: {session_id}")
+    headers = {
+        'accept': 'application/json',
+        'accept-language': 'en-US,en;q=0.9',
+        'content-type': 'application/json',
+        'language': 'en',
+        'priority': 'u=1, i',
+        'referer': f'https://creator.shopee.co.id/dashboard/live/{session_id}',
+        'sec-ch-ua': '"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-origin',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        'x-env': 'live',
+        'x-region': 'id',
+        'x-region-domain': 'co.id',
+        'x-region-timezone': '+0700'
+    }
+
+    params = {
+        'sessionId': session_id,
+    }
+
+    # Parse cookies string ke dictionary
+    cookies = {}
+    if cookie_string:
+        cookie_pairs = cookie_string.split(';')
+        for pair in cookie_pairs:
+            if '=' in pair:
+                key, value = pair.strip().split('=', 1)
+                cookies[key] = value
+
+    try:
+        response = requests.get(
+            'https://creator.shopee.co.id/supply/api/lm/sellercenter/realtime/dashboard/sessionInfo',
+            params=params,
+            cookies=cookies,
+            headers=headers,
+        )
+        
+        response_data = response.json()
+        
+        if 'data' in response_data and 'sessionStreamingUrl' in response_data['data']:
+            return response_data['data']['sessionStreamingUrl'], response_data
+        else:
+            return None, response_data
+    except Exception as e:
+        return None, str(e)
+
+def download_flv(flv_url, duration_minutes=20):
+    """Download FLV dari URL selama durasi tertentu"""
+    global download_process, download_status
+    download_status = True
+    
+    # Buat direktori untuk menyimpan file
+    download_dir = "downloaded_videos"
+    if not os.path.exists(download_dir):
+        os.makedirs(download_dir)
+    
+    # Nama file output dengan durasi
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    output_file = os.path.join(download_dir, f"shopee_live_{timestamp}_dur{duration_minutes}min.flv")
+    
+    print_log(f"Mulai mengunduh dari {flv_url}")
+    print_log(f"File akan disimpan di: {output_file}")
+    print_log(f"Durasi download diatur: {duration_minutes} menit")
+    
+    # Perintah FFmpeg untuk download
+    ffmpeg_download_cmd = [
+        FFMPEG_PATH,
+        "-i", flv_url,
+        "-c", "copy",
+        # Tambahkan parameter untuk debug dan lebih toleran terhadap error
+        "-reconnect", "1",
+        "-reconnect_streamed", "1", 
+        "-reconnect_delay_max", "5",
+        output_file
+    ]
+    
+    try:
+        # Tampilkan perintah yang akan dijalankan
+        cmd_str = " ".join(ffmpeg_download_cmd)
+        print_log(f"Menjalankan: {cmd_str}")
+        
+        # Gunakan creationflags untuk menyembunyikan jendela konsol di Windows
+        download_process = subprocess.Popen(
+            ffmpeg_download_cmd, 
+            stderr=subprocess.PIPE, 
+            stdout=subprocess.PIPE, 
+            stdin=subprocess.PIPE,
+            text=True,
+            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+        )
+        
+        print_log(f"Proses download dimulai dengan PID: {download_process.pid}")
+        
+        # Timer untuk membatasi durasi download
+        download_timer = threading.Timer(duration_minutes * 60, stop_download)
+        download_timer.start()
+        
+        # Metode sederhana untuk membaca output
+        for line in download_process.stderr:
+            if not download_status:
+                break
+        
+        # Cek status proses jika keluar dari loop
+        if download_process.poll() is None:
+            print_log("Menghentikan proses download...")
+            download_process.terminate()
+            try:
+                download_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                download_process.kill()
+        
+        if download_status:  # Jika bukan dihentikan oleh user
+            print_log("Download selesai!")
+            return output_file
+        else:
+            print_log("Download dihentikan")
+            return None
+    except Exception as e:
+        print_log(f"Error download: {str(e)}")
+        import traceback
+        print_log(traceback.format_exc())
+        return None
+
+def stop_download():
+    """Menghentikan proses download"""
+    global download_process, download_status
+    download_status = False
+    
+    try:
+        if download_process is not None:
+            print_log("Download dihentikan")
+            
+            # Metode 1: Hentikan proses menggunakan subprocess
+            if hasattr(download_process, 'pid'):
+                print_log(f"Menghentikan proses dengan PID: {download_process.pid}")
+                
+                # Cara lebih agresif untuk Windows
+                if os.name == 'nt':
+                    try:
+                        # Gunakan taskkill untuk benar-benar menghentikan proses
+                        subprocess.run(['taskkill', '/F', '/T', '/PID', str(download_process.pid)], 
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        print_log("Proses dihentikan dengan taskkill")
+                    except Exception as kill_err:
+                        print_log(f"Error taskkill: {str(kill_err)}")
+                
+                # Metode 2: Gunakan psutil
+                try:
+                    parent = psutil.Process(download_process.pid)
+                    # Kill proses anak terlebih dahulu
+                    for child in parent.children(recursive=True):
+                        try:
+                            child.kill()  # Gunakan kill() daripada terminate()
+                        except psutil.NoSuchProcess:
+                            pass
+                    # Kill proses induk
+                    if parent.is_running():
+                        parent.kill()  # Gunakan kill() daripada terminate()
+                        print_log("Proses FFmpeg dimatikan")
+                except psutil.NoSuchProcess:
+                    pass
+                except Exception as ps_err:
+                    print_log(f"Error psutil: {str(ps_err)}")
+            
+            # Metode 3: Coba cara subprocess standar
+            try:
+                download_process.kill()  # Gunakan kill() yang lebih kuat daripada terminate()
+            except Exception:
+                pass
+            
+            # Reset variabel
+            download_process = None
+        else:
+            print_log("Tidak ada proses download untuk dihentikan.")
+    except Exception as e:
+        print_log(f"Error: {str(e)}")
+
+def start_streaming(video_file_path, rtmp_url):
+    """Memulai proses streaming dari file video ke RTMP URL"""
+    global streaming_process, streaming_status, reconnect_attempts
+    streaming_status = True
+    reconnect_attempts = 0
+    
+    if not os.path.isfile(video_file_path):
+        print_log(f"File video tidak ditemukan: {video_file_path}")
+        return False
+    
+    print_log("Streaming dimulai")
+    
+    # Perintah FFmpeg untuk streaming
+    ffmpeg_command = [
+        FFMPEG_PATH,
+        "-re",
+        "-stream_loop", "-1",
+        "-threads", "4",
+        "-i", video_file_path,
+        "-c", "copy",
+        "-fflags", "+genpts",
+        "-rtmp_live", "live",
+        "-rtmp_conn", "S:OK",
+        "-rtmp_flashver", "FMLE/3.0",
+        "-use_wallclock_as_timestamps", "1",
+        "-f", "flv",
+        rtmp_url
+    ]
+    
+    try:
+        while streaming_status:
+            print_log(f"Memulai FFmpeg... (Percobaan: {reconnect_attempts + 1})")
+            
+            # Gunakan creationflags untuk menyembunyikan jendela konsol di Windows
+            streaming_process = subprocess.Popen(
+                ffmpeg_command, 
+                stderr=subprocess.PIPE, 
+                text=True,
+                creationflags=SUBPROCESS_CREATE_NO_WINDOW
+            )
+            
+            # Monitor proses untuk deteksi error
+            connection_error = False
+            eof_detected = False
+            error_message = ""
+            
+            # Metode membaca output yang kompatibel dengan Windows
+            while True:
+                output = streaming_process.stderr.readline()
+                if output:
+                    # Deteksi jika file berakhir
+                    if "End of file" in output or "Invalid data" in output:
+                        eof_detected = True
+                        print_log("Akhir file terdeteksi, akan memulai ulang streaming...")
+                        break
+                    
+                    # Deteksi error koneksi
+                    if any(err in output for err in [
+                        "Connection timed out", 
+                        "Error writing header", 
+                        "Connection refused", 
+                        "Invalid argument",
+                        "Server error", 
+                        "Failed to",
+                        "Error number",
+                        "Cannot open connection"
+                    ]):
+                        connection_error = True
+                        error_message = output.strip()
+                        print_log(f"Error koneksi terdeteksi: {error_message}")
+                        break
+                
+                # Check if process exited
+                if not output and streaming_process.poll() is not None:
+                    break
+                    
+                # Hindari CPU usage tinggi
+                time.sleep(0.05)
+            
+            # Jika proses berhenti dan streaming masih aktif
+            if streaming_status:
+                if eof_detected or connection_error:
+                    if auto_reconnect:
+                        reconnect_attempts += 1
+                        if reconnect_attempts < max_reconnect_attempts:
+                            print_log(f"Mencoba koneksi ulang ({reconnect_attempts}/{max_reconnect_attempts})...")
+                            # Tunggu sebentar sebelum memulai ulang
+                            time.sleep(2)
+                            continue
+                        else:
+                            print_log("Batas maksimum percobaan koneksi ulang tercapai")
+                            streaming_status = False
+                    else:
+                        print_log("Auto reconnect dinonaktifkan. Streaming dihentikan.")
+                        streaming_status = False
+                else:
+                    print_log("FFmpeg terhenti tanpa error yang terdeteksi. Mencoba ulang dalam 5 detik...")
+                    time.sleep(5)
+            else:
+                print_log("Streaming dihentikan oleh pengguna")
+                break
+                
+        return True
+    except Exception as e:
+        print_log(f"Error: {str(e)}")
+        print_log("Terjadi kesalahan saat streaming.")
+        streaming_status = False
+        return False
+
+def stop_streaming():
+    """Menghentikan proses streaming"""
+    global streaming_process, streaming_status, auto_reconnect
+    streaming_status = False
+    auto_reconnect = False
+    print_log("Menghentikan streaming...")
+    
+    try:
+        if streaming_process is not None:
+            pid_to_kill = None
+            
+            if hasattr(streaming_process, 'pid'):
+                pid_to_kill = streaming_process.pid
+                print_log(f"Menghentikan proses dengan PID: {pid_to_kill}")
+            
+                # Metode cepat: coba kill langsung dulu
+                try:
+                    streaming_process.kill()
+                    print_log("Proses streaming dimatikan")
+                except Exception:
+                    pass
+            
+                # Gunakan taskkill di Windows sebagai cadangan
+                if os.name == 'nt':
+                    try:
+                        # Non-blocking dengan Popen
+                        subprocess.Popen(
+                            ['taskkill', '/F', '/T', '/PID', str(pid_to_kill)],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+                        )
+                        print_log("Menjalankan taskkill untuk memastikan proses berhenti")
+                    except Exception as e:
+                        print_log(f"Error taskkill: {str(e)}")
+            
+            # Reset variabel
+            streaming_process = None
+            print_log("Streaming telah dihentikan")
+        else:
+            print_log("Tidak ada proses streaming untuk dihentikan.")
+    except Exception as e:
+        print_log(f"Error saat menghentikan streaming: {str(e)}")
+
+def handle_keyboard_interrupt():
+    """Menangani keyboard interrupt (Ctrl+C)"""
+    global streaming_process, download_process
+    
+    print_log("\nProgram dihentikan. Membersihkan proses...")
+    
+    # Hentikan semua proses yang mungkin masih berjalan
+    if streaming_process and hasattr(streaming_process, 'poll') and streaming_process.poll() is None:
+        try:
+            streaming_process.kill()
+            print_log("Proses streaming dihentikan")
+        except Exception:
+            pass
+            
+    if download_process and hasattr(download_process, 'poll') and download_process.poll() is None:
+        try:
+            download_process.kill()
+            print_log("Proses download dihentikan")
+        except Exception:
+            pass
+    
+    print_log("Program selesai.")
+    sys.exit(0)
+
+def interactive_mode():
+    """Mode interaktif untuk menjalankan proses secara berurutan"""
+    try:
+        # Cetak header
+        print("\n" + "="*50)
+        print("SHOPEE LIVE STREAMING - MODE INTERAKTIF")
+        print("="*50)
+        
+        # 1. Input nama akun
+        account_name = input("\nMasukkan nama akun Shopee: ")
+        print_log(f"Akun: {account_name}")
+        
+        # 2. Input cookie
+        print("\nMasukkan cookie Shopee (paste disini):")
+        cookie_string = input()
+        print_log(f"Cookie berhasil dimasukkan ({len(cookie_string)} karakter)")
+        
+        # 3a. Dapatkan session
+        print_log("Mendapatkan session ID...")
+        session_data = check_session(cookie_string)
+        
+        if not session_data or 'data' not in session_data or 'list' not in session_data['data'] or len(session_data['data']['list']) == 0:
+            print_log("ERROR: Tidak dapat mendapatkan data session. Periksa cookie Anda.")
+            return
+            
+        session_id = session_data['data']['list'][0].get('sessionId', None)
+        if not session_id:
+            print_log("ERROR: ID sesi tidak ditemukan.")
+            return
+            
+        print_log(f"Session ID berhasil didapatkan: {session_id}")
+        
+        # 3b. Dapatkan RTMP
+        print_log("Mendapatkan URL RTMP...")
+        push_urls = get_data_live(session_id, cookie_string)
+        
+        if not push_urls:
+            print_log("ERROR: Tidak dapat mendapatkan URLs. Periksa session ID dan cookie Anda.")
+            return
+            
+        filtered_urls = [url for url in push_urls if
+                       not re.search(r'rtmp://\d+\.\d+\.\d+\.\d+/', url) and 'srtrtmp' not in url]
+        
+        if not filtered_urls:
+            print_log("ERROR: Tidak ada RTMP URL yang ditemukan.")
+            return
+            
+        rtmp_url = filtered_urls[0]
+        print_log(f"RTMP URL berhasil didapatkan: {rtmp_url}")
+        
+        # 3c. Dapatkan link download (streaming URL)
+        print_log("Mendapatkan URL streaming FLV...")
+        streaming_url, response_data = get_streaming_url(session_id, cookie_string)
+        
+        if not streaming_url:
+            print_log("ERROR: Tidak dapat mendapatkan URL streaming.")
+            return
+            
+        print_log(f"URL streaming berhasil didapatkan: {streaming_url}")
+        
+        # Tampilkan informasi tambahan
+        if isinstance(response_data, dict) and 'data' in response_data:
+            data = response_data['data']
+            if 'sessionTitle' in data:
+                print_log(f"Judul: {data['sessionTitle']}")
+            if 'sessionStatus' in data:
+                status = "Aktif" if data['sessionStatus'] == 1 else "Tidak Aktif"
+                print_log(f"Status: {status}")
+        
+        # 3d. Tanya berapa menit durasi download
+        while True:
+            try:
+                duration_input = input("\nBerapa menit durasi download (default 20): ")
+                if duration_input.strip() == "":
+                    duration_minutes = 20
+                    break
+                duration_minutes = int(duration_input)
+                if duration_minutes <= 0:
+                    print("Durasi harus lebih dari 0 menit!")
+                    continue
+                break
+            except ValueError:
+                print("Masukkan angka yang valid!")
+        
+        print_log(f"Durasi download diatur: {duration_minutes} menit")
+        
+        # 3e. Download video
+        print_log("Memulai proses download...")
+        video_file = download_flv(streaming_url, duration_minutes)
+        
+        if not video_file:
+            print_log("ERROR: Download gagal atau dibatalkan.")
+            return
+        
+        # 3f. Auto mulai streaming setelah download selesai
+        print_log(f"Download selesai. File: {video_file}")
+        print_log("Memulai proses streaming...")
+        
+        # Konfirmasi streaming
+        print("\nApakah Anda ingin memulai streaming sekarang? (y/n): ")
+        confirm = input().strip().lower()
+        if confirm != 'y':
+            print_log("Streaming dibatalkan oleh pengguna.")
+            return
+        
+        # Mulai streaming
+        start_streaming(video_file, rtmp_url)
+        
+    except KeyboardInterrupt:
+        handle_keyboard_interrupt()
+    except Exception as e:
+        print_log(f"Error: {str(e)}")
+        import traceback
+        print_log(traceback.format_exc())
+    finally:
+        print_log("Program selesai.")
+
+if __name__ == "__main__":
+    # Cek FFmpeg
+    if os.path.exists(FFMPEG_PATH):
+        print_log(f"FFmpeg ditemukan: {FFMPEG_PATH}")
+    else:
+        print_log("Menggunakan FFmpeg dari PATH sistem")
+    
+    # Jalankan mode interaktif
+    interactive_mode()
