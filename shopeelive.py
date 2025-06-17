@@ -324,9 +324,41 @@ def download_flv(flv_url, duration_minutes=20):
             print_log(f"Download selesai! File berhasil diunduh: {output_file}")
             print_log(f"Ukuran file: {file_size_mb:.2f} MB")
             download_status = True
+            
+            # Verifikasi file dengan FFprobe untuk memastikan file tidak rusak
+            try:
+                verify_cmd = [
+                    'ffprobe',
+                    '-v', 'error',
+                    '-show_entries', 'format=duration',
+                    '-of', 'default=noprint_wrappers=1:nokey=1',
+                    output_file
+                ]
+                verify_result = subprocess.run(verify_cmd, capture_output=True, text=True)
+                
+                if verify_result.returncode == 0 and verify_result.stdout.strip():
+                    duration = float(verify_result.stdout.strip())
+                    print_log(f"File terverifikasi dengan durasi: {duration:.2f} detik")
+                else:
+                    print_log(f"Peringatan: File mungkin tidak lengkap atau rusak")
+            except Exception as e:
+                print_log(f"Tidak dapat memverifikasi file: {str(e)}")
+            
             return output_file
         else:
             print_log(f"Download gagal. File tidak ada atau kosong.")
+            # Coba cari file yang mungkin sudah diunduh sebelumnya
+            print_log("Mencari file yang mungkin sudah diunduh sebelumnya...")
+            files = [os.path.join(download_dir, f) for f in os.listdir(download_dir) if f.endswith('.flv')]
+            if files:
+                # Ambil file terbaru berdasarkan waktu modifikasi
+                latest_file = max(files, key=os.path.getmtime)
+                file_size_mb = os.path.getsize(latest_file) / (1024*1024)
+                print_log(f"Menggunakan file yang sudah ada: {latest_file}")
+                print_log(f"Ukuran file: {file_size_mb:.2f} MB")
+                download_status = True
+                return latest_file
+            
             download_status = False
             return None
     except Exception as e:
@@ -650,23 +682,60 @@ def interactive_mode():
         
         # 3e. Download video
         print_log("Memulai proses download...")
-        video_file = download_flv(streaming_url, duration_minutes)
+        video_file = None
+        download_thread = None
         
-        # Cek apakah file berhasil diunduh atau mencari file yang sudah ada
-        if video_file is None:
-            print_log("Mencari file yang mungkin sudah diunduh sebelumnya...")
-            # Coba cari file yang mungkin sudah diunduh
-            download_dir = "downloaded_videos"
-            if os.path.exists(download_dir):
-                # Cari file terbaru di direktori download
-                files = [os.path.join(download_dir, f) for f in os.listdir(download_dir) if f.endswith('.flv')]
-                if files:
+        # Cek apakah ada file yang sudah diunduh sebelumnya
+        download_dir = "downloaded_videos"
+        if os.path.exists(download_dir):
+            files = [os.path.join(download_dir, f) for f in os.listdir(download_dir) if f.endswith('.flv')]
+            if files:
+                print_log("File yang sudah diunduh sebelumnya ditemukan.")
+                print_log("Apakah Anda ingin menggunakan file yang sudah ada? (y/n): ")
+                use_existing = input().strip().lower() == 'y'
+                if use_existing:
                     # Ambil file terbaru berdasarkan waktu modifikasi
                     video_file = max(files, key=os.path.getmtime)
+                    file_size_mb = os.path.getsize(video_file) / (1024*1024)
                     print_log(f"Menggunakan file yang sudah ada: {video_file}")
+                    print_log(f"Ukuran file: {file_size_mb:.2f} MB")
+        
+        # Jika tidak menggunakan file yang sudah ada, mulai download baru
+        if not video_file:
+            # Jalankan download dalam thread terpisah agar tidak memblokir
+            def download_thread_func():
+                nonlocal video_file
+                video_file = download_flv(streaming_url, duration_minutes)
+            
+            download_thread = threading.Thread(target=download_thread_func)
+            download_thread.daemon = True
+            download_thread.start()
+            
+            # Tunggu download selesai atau durasi tercapai
+            start_time = time.time()
+            max_wait_time = duration_minutes * 60 + 10  # Tambah 10 detik toleransi
+            
+            print_log("Menunggu download selesai...")
+            download_thread.join(timeout=max_wait_time)
+            
+            if download_thread.is_alive():
+                print_log("Download masih berjalan tapi durasi tunggu sudah tercapai.")
+                print_log("Mencari file yang sudah diunduh...")
+                
+                # Cari file yang mungkin sudah diunduh sebagian
+                if os.path.exists(download_dir):
+                    files = [os.path.join(download_dir, f) for f in os.listdir(download_dir) if f.endswith('.flv')]
+                    if files:
+                        video_file = max(files, key=os.path.getmtime)
+                        file_size_mb = os.path.getsize(video_file) / (1024*1024)
+                        print_log(f"Menggunakan file yang sudah diunduh sebagian: {video_file}")
+                        print_log(f"Ukuran file: {file_size_mb:.2f} MB")
+                
+                # Hentikan download jika masih berjalan
+                stop_download()
         
         # Jika masih tidak ada file, keluar
-        if not video_file:
+        if not video_file or not os.path.exists(video_file) or os.path.getsize(video_file) == 0:
             print_log("ERROR: Tidak ada file video untuk streaming.")
             if auto_stream:
                 print_log("Streaming tidak dapat dimulai karena tidak ada file video.")
@@ -687,7 +756,19 @@ def interactive_mode():
                 print_log("ERROR: Gagal memulai streaming")
         else:
             print_log("Download selesai. Streaming tidak dimulai (sesuai pilihan pengguna).")
-            print_log("Program selesai.")
+            print("\nApakah Anda ingin memulai streaming sekarang? (y/n): ")
+            start_now = input().strip().lower() == 'y'
+            if start_now:
+                print_log("="*50)
+                print_log("MEMULAI PROSES STREAMING")
+                print_log("="*50)
+                streaming_result = start_streaming(video_file, rtmp_url, account_name)
+                if streaming_result:
+                    print_log("Streaming berhasil dimulai")
+                else:
+                    print_log("ERROR: Gagal memulai streaming")
+            else:
+                print_log("Program selesai.")
         
     except KeyboardInterrupt:
         handle_keyboard_interrupt()
