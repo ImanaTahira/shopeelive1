@@ -238,22 +238,20 @@ def download_flv(flv_url, duration_minutes=20):
     print_log(f"File akan disimpan di: {output_file}")
     print_log(f"Durasi download diatur: {duration_minutes} menit")
     
-    # Perintah FFmpeg untuk download tanpa parameter -t
-    ffmpeg_download_cmd = [
-        FFMPEG_PATH,
-        "-i", flv_url,
-        "-c", "copy",
-        "-reconnect", "1",
-        "-reconnect_streamed", "1", 
-        "-reconnect_delay_max", "5",
+    # Download stream
+    download_cmd = [
+        'ffmpeg',
+        '-i', flv_url,
+        '-c', 'copy',
+        '-f', 'mp4',
         output_file
     ]
     
     try:
-        cmd_str = " ".join(ffmpeg_download_cmd)
+        cmd_str = " ".join(download_cmd)
         print_log(f"Menjalankan: {cmd_str}")
         download_process = subprocess.Popen(
-            ffmpeg_download_cmd, 
+            download_cmd, 
             stderr=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stdin=subprocess.PIPE,
