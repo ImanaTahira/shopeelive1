@@ -34,6 +34,12 @@ reconnect_attempts = 0
 max_reconnect_attempts = 5  # Batas percobaan koneksi ulang
 log_file = "shopee_live.log"  # File untuk menyimpan log
 
+# Daftar user yang diizinkan
+ALLOWED_USERS = {
+    "admin": "passwordku123",
+    "tim1": "rahasia456"
+}
+
 def clear_temp_files():
     """Membersihkan file sementara yang dibuat oleh script"""
     try:
@@ -527,7 +533,15 @@ def handle_keyboard_interrupt():
 def interactive_mode():
     """Mode interaktif untuk menjalankan proses secara berurutan"""
     try:
-        # Cetak header
+        print("\n=== LOGIN SHOPEE CLI ===")
+        username = input("Username: ")
+        password = input("Password: ")
+        # Cek login
+        if username not in ALLOWED_USERS or ALLOWED_USERS[username] != password:
+            print("Login gagal! Username atau password salah.")
+            sys.exit(1)
+        print("Login berhasil!\n")
+        # ...lanjut proses seperti biasa...
         print("\n" + "="*50)
         print("SHOPEE LIVE STREAMING - MODE INTERAKTIF")
         print("="*50)
