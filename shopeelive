@@ -8,6 +8,13 @@ import subprocess
 import psutil
 import os
 import json
+import shutil
+import datetime
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
 
 # Konstanta untuk subprocess creationflags (hanya untuk Windows)
 SUBPROCESS_CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
@@ -25,11 +32,74 @@ download_status = False
 auto_reconnect = True
 reconnect_attempts = 0
 max_reconnect_attempts = 5  # Batas percobaan koneksi ulang
+log_file = "shopee_live.log"  # File untuk menyimpan log
+
+def clear_temp_files():
+    """Membersihkan file sementara yang dibuat oleh script"""
+    try:
+        # Hapus file PowerShell sementara jika ada
+        temp_ps_file = os.path.join(os.environ.get('TEMP', ''), 'run_shopee.ps1')
+        temp_py_file = os.path.join(os.environ.get('TEMP', ''), 'shopee_live_temp.py')
+        
+        for file_path in [temp_ps_file, temp_py_file]:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                print_log(f"File sementara dihapus: {file_path}")
+        
+        # Hapus file VBS jika ada
+        temp_vbs_file = os.path.join(os.environ.get('TEMP', ''), 'invisible.vbs')
+        if os.path.exists(temp_vbs_file):
+            os.remove(temp_vbs_file)
+            print_log(f"File sementara dihapus: {temp_vbs_file}")
+    except Exception as e:
+        print_log(f"Error saat membersihkan file sementara: {str(e)}")
+
+def clear_logs(force=False):
+    """Membersihkan file log"""
+    try:
+        if os.path.exists(log_file):
+            # Buat backup log lama dengan timestamp
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            backup_file = f"{log_file}.{timestamp}.bak"
+            
+            # Coba pindahkan file log lama ke backup
+            try:
+                shutil.copy2(log_file, backup_file)
+                print(f"[{time.strftime('%H:%M:%S')}] Log lama dicadangkan ke: {backup_file}")
+            except Exception as backup_err:
+                print(f"[{time.strftime('%H:%M:%S')}] Gagal membuat backup log: {str(backup_err)}")
+            
+            # Hapus isi file log
+            with open(log_file, 'w') as f:
+                f.write(f"=== Log dibersihkan pada {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+            
+            if force:
+                print(f"[{time.strftime('%H:%M:%S')}] File log dibersihkan oleh pengguna")
+            else:
+                print(f"[{time.strftime('%H:%M:%S')}] File log dibersihkan otomatis (melebihi 500 baris)")
+    except Exception as e:
+        print(f"[{time.strftime('%H:%M:%S')}] Error saat membersihkan log: {str(e)}")
 
 def print_log(message):
-    """Tampilkan pesan log dengan timestamp"""
-    timestamp = time.strftime("[%H:%M:%S] ")
-    print(f"{timestamp}{message}")
+    """Tampilkan pesan log dengan timestamp dan simpan ke file"""
+    # Hanya tampilkan pesan penting
+    important_messages = [
+        "ERROR", "Error", "error",
+        "Download selesai", "Streaming dimulai",
+        "Streaming berhasil", "Streaming dihentikan"
+    ]
+    
+    if any(msg in message for msg in important_messages):
+        timestamp = time.strftime("[%H:%M:%S] ")
+        log_message = f"{timestamp}{message}"
+        print(log_message)
+        
+        # Tulis ke file log
+        try:
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(log_message + "\n")
+        except Exception as e:
+            print(f"[ERROR] Gagal menulis ke file log: {str(e)}")
 
 def check_session(cookie_string):
     """Memeriksa sesi dari cookie Shopee"""
@@ -162,12 +232,11 @@ def download_flv(flv_url, duration_minutes=20):
     print_log(f"File akan disimpan di: {output_file}")
     print_log(f"Durasi download diatur: {duration_minutes} menit")
     
-    # Perintah FFmpeg untuk download
+    # Perintah FFmpeg untuk download tanpa parameter -t
     ffmpeg_download_cmd = [
         FFMPEG_PATH,
         "-i", flv_url,
         "-c", "copy",
-        # Tambahkan parameter untuk debug dan lebih toleran terhadap error
         "-reconnect", "1",
         "-reconnect_streamed", "1", 
         "-reconnect_delay_max", "5",
@@ -175,107 +244,138 @@ def download_flv(flv_url, duration_minutes=20):
     ]
     
     try:
-        # Tampilkan perintah yang akan dijalankan
         cmd_str = " ".join(ffmpeg_download_cmd)
         print_log(f"Menjalankan: {cmd_str}")
-        
-        # Gunakan creationflags untuk menyembunyikan jendela konsol di Windows
         download_process = subprocess.Popen(
             ffmpeg_download_cmd, 
-            stderr=subprocess.PIPE, 
-            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE,
             stdin=subprocess.PIPE,
             text=True,
             creationflags=SUBPROCESS_CREATE_NO_WINDOW
         )
-        
         print_log(f"Proses download dimulai dengan PID: {download_process.pid}")
         
-        # Timer untuk membatasi durasi download
-        download_timer = threading.Timer(duration_minutes * 60, stop_download)
-        download_timer.start()
+        # Inisialisasi progress bar
+        if TQDM_AVAILABLE:
+            pbar = tqdm(total=100, desc="Download Progress", unit="%")
+        else:
+            print("Download Progress: 0%", end="", flush=True)
         
-        # Metode sederhana untuk membaca output
-        for line in download_process.stderr:
-            if not download_status:
-                break
+        start_time = time.time()
+        end_time = start_time + (duration_minutes * 60)
+        last_progress = 0
         
-        # Cek status proses jika keluar dari loop
+        # Progress bar berbasis waktu berjalan
+        while time.time() < end_time and download_process.poll() is None:
+            elapsed = time.time() - start_time
+            progress = min(100, int((elapsed / (duration_minutes * 60)) * 100))
+            if progress > last_progress:
+                last_progress = progress
+                if TQDM_AVAILABLE:
+                    pbar.n = progress
+                    pbar.refresh()
+                else:
+                    print(f"\rDownload Progress: {progress}%", end="", flush=True)
+            time.sleep(0.2)
+        
+        # Setelah waktu habis, hentikan proses FFmpeg secara tegas
         if download_process.poll() is None:
-            print_log("Menghentikan proses download...")
-            download_process.terminate()
+            print_log(f"Durasi download {duration_minutes} menit tercapai.")
             try:
-                download_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                download_process.kill()
+                download_process.stdin.write('q\n')
+                download_process.stdin.flush()
+                time.sleep(2)
+            except:
+                pass
+            if download_process.poll() is None:
+                try:
+                    download_process.terminate()
+                    time.sleep(2)
+                except:
+                    pass
+            if download_process.poll() is None:
+                try:
+                    download_process.kill()
+                except:
+                    pass
+            # Tutup semua stream agar tidak deadlock
+            try:
+                download_process.stdout.close()
+                download_process.stderr.close()
+            except:
+                pass
         
-        if download_status:  # Jika bukan dihentikan oleh user
-            print_log("Download selesai!")
+        # Tutup progress bar secara paksa
+        if TQDM_AVAILABLE:
+            pbar.n = 100
+            pbar.refresh()
+            pbar.close()
+        else:
+            print("\rDownload Progress: 100%")
+        
+        # Jangan tunggu output lagi, langsung cek file
+        if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+            file_size_mb = os.path.getsize(output_file) / (1024*1024)
+            print_log(f"Download selesai! File berhasil diunduh: {output_file}")
+            print_log(f"Ukuran file: {file_size_mb:.2f} MB")
+            download_status = True
             return output_file
         else:
-            print_log("Download dihentikan")
+            print_log(f"Download gagal. File tidak ada atau kosong.")
+            download_status = False
             return None
     except Exception as e:
         print_log(f"Error download: {str(e)}")
         import traceback
         print_log(traceback.format_exc())
+        download_status = False
         return None
 
+# Fungsi stop_download yang lebih aman
 def stop_download():
-    """Menghentikan proses download"""
+    """Menghentikan proses download dengan cara yang lebih aman"""
     global download_process, download_status
-    download_status = False
     
     try:
         if download_process is not None:
-            print_log("Download dihentikan")
+            print_log("Menghentikan proses download...")
             
-            # Metode 1: Hentikan proses menggunakan subprocess
-            if hasattr(download_process, 'pid'):
-                print_log(f"Menghentikan proses dengan PID: {download_process.pid}")
-                
-                # Cara lebih agresif untuk Windows
-                if os.name == 'nt':
-                    try:
-                        # Gunakan taskkill untuk benar-benar menghentikan proses
-                        subprocess.run(['taskkill', '/F', '/T', '/PID', str(download_process.pid)], 
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        print_log("Proses dihentikan dengan taskkill")
-                    except Exception as kill_err:
-                        print_log(f"Error taskkill: {str(kill_err)}")
-                
-                # Metode 2: Gunakan psutil
+            # Coba metode yang lebih lembut dulu
+            if download_process.poll() is None:
                 try:
-                    parent = psutil.Process(download_process.pid)
-                    # Kill proses anak terlebih dahulu
-                    for child in parent.children(recursive=True):
-                        try:
-                            child.kill()  # Gunakan kill() daripada terminate()
-                        except psutil.NoSuchProcess:
-                            pass
-                    # Kill proses induk
-                    if parent.is_running():
-                        parent.kill()  # Gunakan kill() daripada terminate()
-                        print_log("Proses FFmpeg dimatikan")
-                except psutil.NoSuchProcess:
+                    # Kirim sinyal q untuk keluar dengan benar
+                    download_process.stdin.write('q\n')
+                    download_process.stdin.flush()
+                    time.sleep(2)
+                except:
                     pass
-                except Exception as ps_err:
-                    print_log(f"Error psutil: {str(ps_err)}")
+                
+                # Jika masih berjalan, coba terminate
+                if download_process.poll() is None:
+                    try:
+                        download_process.terminate()
+                        download_process.wait(timeout=3)
+                    except:
+                        pass
+                
+                # Jika masih berjalan, gunakan kill sebagai upaya terakhir
+                if download_process.poll() is None:
+                    try:
+                        download_process.kill()
+                    except:
+                        pass
             
-            # Metode 3: Coba cara subprocess standar
-            try:
-                download_process.kill()  # Gunakan kill() yang lebih kuat daripada terminate()
-            except Exception:
-                pass
-            
-            # Reset variabel
+            print_log("Download dihentikan")
             download_process = None
+            # PENTING: Jangan ubah download_status menjadi False di sini
+            # Biarkan status tetap True agar proses streaming bisa berlanjut
         else:
             print_log("Tidak ada proses download untuk dihentikan.")
     except Exception as e:
         print_log(f"Error: {str(e)}")
 
-def start_streaming(video_file_path, rtmp_url):
+def start_streaming(video_file_path, rtmp_url, account_name=None):
     """Memulai proses streaming dari file video ke RTMP URL"""
     global streaming_process, streaming_status, reconnect_attempts
     streaming_status = True
@@ -285,7 +385,12 @@ def start_streaming(video_file_path, rtmp_url):
         print_log(f"File video tidak ditemukan: {video_file_path}")
         return False
     
-    print_log("Streaming dimulai")
+    if account_name:
+        print_log(f"Streaming dimulai untuk akun: {account_name}")
+    else:
+        print_log("Streaming dimulai")
+    print_log(f"Streaming file: {video_file_path}")
+    print_log(f"Ke URL RTMP: {rtmp_url}")
     
     # Perintah FFmpeg untuk streaming
     ffmpeg_command = [
@@ -305,82 +410,60 @@ def start_streaming(video_file_path, rtmp_url):
     ]
     
     try:
-        while streaming_status:
-            print_log(f"Memulai FFmpeg... (Percobaan: {reconnect_attempts + 1})")
-            
-            # Gunakan creationflags untuk menyembunyikan jendela konsol di Windows
-            streaming_process = subprocess.Popen(
-                ffmpeg_command, 
-                stderr=subprocess.PIPE, 
-                text=True,
-                creationflags=SUBPROCESS_CREATE_NO_WINDOW
-            )
-            
-            # Monitor proses untuk deteksi error
-            connection_error = False
-            eof_detected = False
-            error_message = ""
-            
-            # Metode membaca output yang kompatibel dengan Windows
-            while True:
-                output = streaming_process.stderr.readline()
-                if output:
-                    # Deteksi jika file berakhir
-                    if "End of file" in output or "Invalid data" in output:
-                        eof_detected = True
-                        print_log("Akhir file terdeteksi, akan memulai ulang streaming...")
-                        break
-                    
-                    # Deteksi error koneksi
-                    if any(err in output for err in [
-                        "Connection timed out", 
-                        "Error writing header", 
-                        "Connection refused", 
-                        "Invalid argument",
-                        "Server error", 
-                        "Failed to",
-                        "Error number",
-                        "Cannot open connection"
-                    ]):
-                        connection_error = True
-                        error_message = output.strip()
-                        print_log(f"Error koneksi terdeteksi: {error_message}")
-                        break
-                
-                # Check if process exited
-                if not output and streaming_process.poll() is not None:
-                    break
-                    
-                # Hindari CPU usage tinggi
-                time.sleep(0.05)
-            
-            # Jika proses berhenti dan streaming masih aktif
-            if streaming_status:
-                if eof_detected or connection_error:
-                    if auto_reconnect:
-                        reconnect_attempts += 1
-                        if reconnect_attempts < max_reconnect_attempts:
-                            print_log(f"Mencoba koneksi ulang ({reconnect_attempts}/{max_reconnect_attempts})...")
-                            # Tunggu sebentar sebelum memulai ulang
-                            time.sleep(2)
-                            continue
-                        else:
-                            print_log("Batas maksimum percobaan koneksi ulang tercapai")
-                            streaming_status = False
-                    else:
-                        print_log("Auto reconnect dinonaktifkan. Streaming dihentikan.")
-                        streaming_status = False
-                else:
-                    print_log("FFmpeg terhenti tanpa error yang terdeteksi. Mencoba ulang dalam 5 detik...")
-                    time.sleep(5)
-            else:
-                print_log("Streaming dihentikan oleh pengguna")
-                break
-                
+        cmd_str = " ".join(ffmpeg_command)
+        print_log(f"Menjalankan: {cmd_str}")
+        streaming_process = subprocess.Popen(
+            ffmpeg_command, 
+            stderr=subprocess.PIPE, 
+            stdout=subprocess.PIPE,
+            stdin=subprocess.PIPE,
+            text=True,
+            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+        )
+        print_log(f"Proses streaming dimulai dengan PID: {streaming_process.pid}")
+        
+        def read_stderr():
+            while streaming_status and streaming_process and streaming_process.poll() is None:
+                try:
+                    line = streaming_process.stderr.readline().strip()
+                    if line:
+                        if any(err in line for err in [
+                            "Error", "error", "Failed", "failed", "Connection timed out", 
+                            "Error writing header", "Connection refused", "Invalid argument",
+                            "Server error"
+                        ]):
+                            print_log(f"Error streaming terdeteksi: {line}")
+                        elif "End of file" in line:
+                            print_log("Akhir file terdeteksi, akan memulai ulang streaming...")
+                except:
+                    pass
+                time.sleep(0.1)
+        
+        stderr_thread = threading.Thread(target=read_stderr)
+        stderr_thread.daemon = True
+        stderr_thread.start()
+        
+        print_log("Streaming sedang berjalan...")
+        print_log("Tekan Ctrl+C untuk menghentikan streaming")
+        
+        try:
+            while streaming_status and streaming_process and streaming_process.poll() is None:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print_log("Streaming dihentikan oleh pengguna")
+            stop_streaming()
+        
+        if streaming_process and streaming_process.poll() is not None:
+            exit_code = streaming_process.poll()
+            print_log(f"Streaming berhenti dengan kode: {exit_code}")
+            if exit_code != 0 and streaming_status:
+                print_log("Streaming berhenti dengan error, mencoba restart...")
+                return start_streaming(video_file_path, rtmp_url, account_name)  # Rekursif restart
         return True
     except Exception as e:
-        print_log(f"Error: {str(e)}")
-        print_log("Terjadi kesalahan saat streaming.")
+        print_log(f"Error saat memulai streaming: {str(e)}")
+        import traceback
+        print_log(traceback.format_exc())
         streaming_status = False
         return False
 
@@ -405,20 +488,6 @@ def stop_streaming():
                     print_log("Proses streaming dimatikan")
                 except Exception:
                     pass
-            
-                # Gunakan taskkill di Windows sebagai cadangan
-                if os.name == 'nt':
-                    try:
-                        # Non-blocking dengan Popen
-                        subprocess.Popen(
-                            ['taskkill', '/F', '/T', '/PID', str(pid_to_kill)],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            creationflags=SUBPROCESS_CREATE_NO_WINDOW
-                        )
-                        print_log("Menjalankan taskkill untuk memastikan proses berhenti")
-                    except Exception as e:
-                        print_log(f"Error taskkill: {str(e)}")
             
             # Reset variabel
             streaming_process = None
@@ -449,6 +518,9 @@ def handle_keyboard_interrupt():
         except Exception:
             pass
     
+    # Bersihkan file sementara
+    clear_temp_files()
+    
     print_log("Program selesai.")
     sys.exit(0)
 
@@ -459,6 +531,28 @@ def interactive_mode():
         print("\n" + "="*50)
         print("SHOPEE LIVE STREAMING - MODE INTERAKTIF")
         print("="*50)
+        
+        # Periksa jika tqdm tersedia, jika tidak, install
+        if not TQDM_AVAILABLE:
+            print_log("Library tqdm tidak tersedia. Mencoba menginstall...")
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "tqdm"])
+                print_log("tqdm berhasil diinstall.")
+                # Import ulang setelah install
+                try:
+                    from tqdm import tqdm
+                    globals()['TQDM_AVAILABLE'] = True
+                except ImportError:
+                    pass
+            except Exception as e:
+                print_log(f"Gagal menginstall tqdm: {str(e)}. Progress bar sederhana akan digunakan.")
+        
+        # Tanya apakah ingin membersihkan log
+        print("\nApakah Anda ingin membersihkan log? (y/n): ")
+        clear_log_choice = input().strip().lower()
+        if clear_log_choice == 'y':
+            clear_logs(force=True)
+            print_log("Log dibersihkan oleh pengguna")
         
         # 1. Input nama akun
         account_name = input("\nMasukkan nama akun Shopee: ")
@@ -538,27 +632,50 @@ def interactive_mode():
         
         print_log(f"Durasi download diatur: {duration_minutes} menit")
         
+        # Tanya apakah ingin langsung streaming setelah download
+        print("\nApakah Anda ingin langsung streaming setelah download? (y/n): ")
+        auto_stream = input().strip().lower() == 'y'
+        
         # 3e. Download video
         print_log("Memulai proses download...")
         video_file = download_flv(streaming_url, duration_minutes)
         
+        # Cek apakah file berhasil diunduh atau mencari file yang sudah ada
+        if video_file is None:
+            print_log("Mencari file yang mungkin sudah diunduh sebelumnya...")
+            # Coba cari file yang mungkin sudah diunduh
+            download_dir = "downloaded_videos"
+            if os.path.exists(download_dir):
+                # Cari file terbaru di direktori download
+                files = [os.path.join(download_dir, f) for f in os.listdir(download_dir) if f.endswith('.flv')]
+                if files:
+                    # Ambil file terbaru berdasarkan waktu modifikasi
+                    video_file = max(files, key=os.path.getmtime)
+                    print_log(f"Menggunakan file yang sudah ada: {video_file}")
+        
+        # Jika masih tidak ada file, keluar
         if not video_file:
-            print_log("ERROR: Download gagal atau dibatalkan.")
+            print_log("ERROR: Tidak ada file video untuk streaming.")
+            if auto_stream:
+                print_log("Streaming tidak dapat dimulai karena tidak ada file video.")
             return
         
         # 3f. Auto mulai streaming setelah download selesai
-        print_log(f"Download selesai. File: {video_file}")
-        print_log("Memulai proses streaming...")
+        print_log(f"File siap: {video_file}")
         
-        # Konfirmasi streaming
-        print("\nApakah Anda ingin memulai streaming sekarang? (y/n): ")
-        confirm = input().strip().lower()
-        if confirm != 'y':
-            print_log("Streaming dibatalkan oleh pengguna.")
-            return
-        
-        # Mulai streaming
-        start_streaming(video_file, rtmp_url)
+        if auto_stream:
+            print_log("="*50)
+            print_log("MEMULAI PROSES STREAMING")
+            print_log("="*50)
+            # Mulai streaming tanpa konfirmasi tambahan
+            streaming_result = start_streaming(video_file, rtmp_url, account_name)
+            if streaming_result:
+                print_log("Streaming berhasil dimulai")
+            else:
+                print_log("ERROR: Gagal memulai streaming")
+        else:
+            print_log("Download selesai. Streaming tidak dimulai (sesuai pilihan pengguna).")
+            print_log("Program selesai.")
         
     except KeyboardInterrupt:
         handle_keyboard_interrupt()
@@ -575,6 +692,9 @@ if __name__ == "__main__":
         print_log(f"FFmpeg ditemukan: {FFMPEG_PATH}")
     else:
         print_log("Menggunakan FFmpeg dari PATH sistem")
+    
+    # Bersihkan file sementara sebelum memulai
+    clear_temp_files()
     
     # Jalankan mode interaktif
     interactive_mode()
