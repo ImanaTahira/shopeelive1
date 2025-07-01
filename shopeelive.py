@@ -123,23 +123,24 @@ def check_session(cookie_string):
     print_log("Mendapatkan data sesi...")
     url = 'https://creator.shopee.co.id/supply/api/lm/sellercenter/realtime/sessionList?page=1&pageSize=1&name='
     headers = {
-        'Host': 'creator.shopee.co.id',
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0',
-        'Accept': 'application/json',
-        'Accept-Language': 'id,en-US;q=0.7,en;q=0.3',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Referer': 'https://creator.shopee.co.id/insight/live/list',
-        'Content-Type': 'application/json',
-        'X-Traceid': 'heG_qY0WxPfYS1WX7klFR',
-        'Language': 'en',
-        'X-Region': 'id',
-        'X-Region-Domain': 'co.id',
-        'X-Region-Timezone': '+0700',
-        'X-Env': 'live',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
-        'Te': 'trailers',
+        'accept': 'application/json',
+        'accept-language': 'en-US,en;q=0.9',
+        'content-type': 'application/json',
+        'language': 'en',
+        'priority': 'u=1, i',
+        'referer': 'https://creator.shopee.co.id/insight/live/list',
+        'sec-ch-ua': '"Not)A;Brand";v="8", "Chromium";v="138", "Google Chrome";v="138"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-origin',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+        'x-env': 'live',
+        'x-region': 'id',
+        'x-region-domain': 'co.id',
+        'x-region-timezone': '+0700',
+        'x-traceid': 'y553LJf7WT26a_ow2Fq6j',
         'Cookie': cookie_string
     }
     
@@ -188,17 +189,18 @@ def get_streaming_url(session_id, cookie_string):
         'language': 'en',
         'priority': 'u=1, i',
         'referer': f'https://creator.shopee.co.id/dashboard/live/{session_id}',
-        'sec-ch-ua': '"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
+        'sec-ch-ua': '"Not)A;Brand";v="8", "Chromium";v="138", "Google Chrome";v="138"',
         'sec-ch-ua-mobile': '?0',
         'sec-ch-ua-platform': '"Windows"',
         'sec-fetch-dest': 'empty',
         'sec-fetch-mode': 'cors',
         'sec-fetch-site': 'same-origin',
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
         'x-env': 'live',
         'x-region': 'id',
         'x-region-domain': 'co.id',
-        'x-region-timezone': '+0700'
+        'x-region-timezone': '+0700',
+        'x-traceid': 'X4mPkyIA08GlA28eVJJ03'
     }
 
     params = {
