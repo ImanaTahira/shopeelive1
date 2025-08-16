@@ -47,8 +47,8 @@ log_file = "shopee_live.log"  # File untuk menyimpan log
 
 # Daftar user yang diizinkan
 ALLOWED_USERS = {
-    "admin": "passwordku123",
-    "tim1": "rahasia456"
+    "admin": "santai",
+    "tim1": "santai"
 }
 
 def clear_temp_files():
